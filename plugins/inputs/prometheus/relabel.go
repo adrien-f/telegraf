@@ -1,7 +1,9 @@
 package prometheus
 
 import (
+	"fmt"
 	"github.com/influxdata/telegraf"
+	"github.com/prometheus/common/model"
 	"regexp"
 	"strings"
 )
@@ -73,6 +75,48 @@ func (p *Prometheus) Process(labels map[string]string, config RelabelConfig) map
 		if !regex.MatchString(val) {
 			return nil
 		}
+	case "labeldrop":
+		for ln := range labels {
+			if regex.MatchString(ln) {
+				delete(labels, ln)
+			}
+		}
+	case "labelkeep":
+		for ln := range labels {
+			if !regex.MatchString(ln) {
+				delete(labels, ln)
+			}
+		}
+	case "replace":
+		indexes := regex.FindStringSubmatchIndex(val)
+		if indexes == nil {
+			break
+		}
+		labelName := model.LabelName(regex.ExpandString([]byte{}, config.TargetLabel, val, indexes))
+		if !labelName.IsValid() {
+			delete(labels, config.TargetLabel)
+			break
+		}
+		labelValue := regex.ExpandString([]byte{}, config.Replacement, val, indexes)
+		if len(labelValue) == 0 {
+			delete(labels, config.TargetLabel)
+			break
+		}
+		labels[string(labelName)] = string(labelValue)
+	case "labelmap":
+		out := make(map[string]string, len(labels))
+		for ln, lv := range labels {
+			out[ln] = lv
+		}
+		for ln, lv := range labels {
+			if regex.MatchString(ln) {
+				res := regex.ReplaceAllString(ln, config.Replacement)
+				out[res] = lv
+			}
+		}
+		labels = out
+	default:
+		panic(fmt.Errorf("relabel: unknown relabel action type %q", config.Action))
 	}
 	return labels
 }
