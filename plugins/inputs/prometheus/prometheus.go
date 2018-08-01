@@ -15,6 +15,7 @@ import (
 	"github.com/influxdata/telegraf/internal"
 	"github.com/influxdata/telegraf/internal/tls"
 	"github.com/influxdata/telegraf/plugins/inputs"
+	"regexp"
 )
 
 const acceptHeader = `application/vnd.google.protobuf;proto=io.prometheus.client.MetricFamily;encoding=delimited;q=0.7,text/plain;version=0.0.4;q=0.3`
@@ -22,6 +23,11 @@ const acceptHeader = `application/vnd.google.protobuf;proto=io.prometheus.client
 type Prometheus struct {
 	// An array of urls to scrape metrics from.
 	URLs []string `toml:"urls"`
+
+	// Array of relabel configs
+	RelabelConfigs []RelabelConfig `toml:"relabels"`
+
+	InstanceTagWithPort bool `toml:"instance_tag_with_port"`
 
 	// An array of Kubernetes services to scrape metrics from.
 	KubernetesServices []string
@@ -34,11 +40,22 @@ type Prometheus struct {
 	tls.ClientConfig
 
 	client *http.Client
+
+	regexCache map[string]*regexp.Regexp
+	cacheBuilt bool
 }
 
 var sampleConfig = `
   ## An array of urls to scrape metrics from.
   urls = ["http://localhost:9100/metrics"]
+
+  instance_tag_with_port = true
+
+  ## Relabels rules inspired from https://prometheus.io/docs/prometheus/latest/configuration/configuration/#%3Crelabel_config%3E
+  # [[inputs.prometheus.relabels]]
+  #  source_labels = ["__name__"]
+  #  regex = "prometheus_.*"
+  #  action = "keep"
 
   ## An array of Kubernetes services to scrape metrics from.
   # kubernetes_services = ["http://my-service-dns.my-namespace:9100/metrics"]
@@ -213,13 +230,16 @@ func (p *Prometheus) gatherURL(u URLAndAddress, acc telegraf.Accumulator) error 
 	// Add (or not) collected metrics
 	for _, metric := range metrics {
 		tags := metric.Tags()
-		// strip user and password from URL
-		u.OriginalURL.User = nil
-		tags["url"] = u.OriginalURL.String()
-		if u.Address != "" {
-			tags["address"] = u.Address
+		instance := u.OriginalURL.Host
+		if !p.InstanceTagWithPort {
+			instance = u.OriginalURL.Hostname()
 		}
-
+		tags["instance"] = instance
+		metric, tags = p.Relabel(metric, tags)
+		if metric == nil {
+			// dropped
+			continue
+		}
 		switch metric.Type() {
 		case telegraf.Counter:
 			acc.AddCounter(metric.Name(), metric.Fields(), tags, metric.Time())
@@ -239,6 +259,11 @@ func (p *Prometheus) gatherURL(u URLAndAddress, acc telegraf.Accumulator) error 
 
 func init() {
 	inputs.Add("prometheus", func() telegraf.Input {
-		return &Prometheus{ResponseTimeout: internal.Duration{Duration: time.Second * 3}}
+		return &Prometheus{
+			ResponseTimeout:     internal.Duration{Duration: time.Second * 3},
+			regexCache:          make(map[string]*regexp.Regexp),
+			cacheBuilt:          false,
+			InstanceTagWithPort: true,
+		}
 	})
 }
