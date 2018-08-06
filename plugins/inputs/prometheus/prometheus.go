@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -20,9 +19,14 @@ import (
 
 const acceptHeader = `application/vnd.google.protobuf;proto=io.prometheus.client.MetricFamily;encoding=delimited;q=0.7,text/plain;version=0.0.4;q=0.3`
 
+type Target struct {
+	Urls   []string          `toml:"urls"`
+	Labels map[string]string `toml:"labels"`
+}
+
 type Prometheus struct {
 	// An array of urls to scrape metrics from.
-	URLs []string `toml:"urls"`
+	Targets []Target `toml:"targets"`
 
 	// Array of relabel configs
 	RelabelConfigs []RelabelConfig `toml:"relabels"`
@@ -47,7 +51,11 @@ type Prometheus struct {
 
 var sampleConfig = `
   ## An array of urls to scrape metrics from.
-  urls = ["http://localhost:9100/metrics"]
+  [[inputs.prometheus.relabels.urls]]
+  	urls = ["http://localhost:9100/metrics"]
+	[labels]
+      foo = "bar"
+		
 
   instance_tag_with_port = true
 
@@ -107,32 +115,19 @@ type URLAndAddress struct {
 	OriginalURL *url.URL
 	URL         *url.URL
 	Address     string
+	Labels      map[string]string
 }
 
 func (p *Prometheus) GetAllURLs() ([]URLAndAddress, error) {
 	allURLs := make([]URLAndAddress, 0)
-	for _, u := range p.URLs {
-		URL, err := url.Parse(u)
-		if err != nil {
-			log.Printf("prometheus: Could not parse %s, skipping it. Error: %s", u, err)
-			continue
-		}
-
-		allURLs = append(allURLs, URLAndAddress{URL: URL, OriginalURL: URL})
-	}
-	for _, service := range p.KubernetesServices {
-		URL, err := url.Parse(service)
-		if err != nil {
-			return nil, err
-		}
-		resolvedAddresses, err := net.LookupHost(URL.Hostname())
-		if err != nil {
-			log.Printf("prometheus: Could not resolve %s, skipping it. Error: %s", URL.Host, err)
-			continue
-		}
-		for _, resolved := range resolvedAddresses {
-			serviceURL := p.AddressToURL(URL, resolved)
-			allURLs = append(allURLs, URLAndAddress{URL: serviceURL, Address: resolved, OriginalURL: URL})
+	for _, target := range p.Targets {
+		for _, targetUrl := range target.Urls {
+			URL, err := url.Parse(targetUrl)
+			if err != nil {
+				log.Printf("prometheus: Could not parse %s, skipping it. Error: %s", targetUrl, err)
+				continue
+			}
+			allURLs = append(allURLs, URLAndAddress{URL: URL, OriginalURL: URL, Labels: target.Labels})
 		}
 	}
 	return allURLs, nil
@@ -235,6 +230,9 @@ func (p *Prometheus) gatherURL(u URLAndAddress, acc telegraf.Accumulator) error 
 			instance = u.OriginalURL.Hostname()
 		}
 		tags["instance"] = instance
+		for k, v := range u.Labels {
+			tags[k] = v
+		}
 		metric, tags = p.Relabel(metric, tags)
 		if metric == nil {
 			// dropped
